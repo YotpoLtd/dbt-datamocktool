@@ -1,8 +1,8 @@
-{% macro get_unit_test_sql(model, input_mapping) %}
+{% macro get_unit_test_sql(model, input_mapping, depends_on) %}
+    {% set dbt_command=var('dbt_command') %}
     {% set ns=namespace(
         test_sql="(select 1) raw_sql",
-        rendered_keys={},
-        graph_model=none
+        rendered_keys={}
     ) %}
 
     {% for k in input_mapping.keys() %}
@@ -10,18 +10,10 @@
         {% do ns.rendered_keys.update({k: render("{{ " + k + " }}")}) %}
     {% endfor %}
 
-    {% if execute %}
+    {% if execute and dbt_command == 'test'%}
         {# inside an execute block because graph nodes aren't well-defined during parsing #}
-        {% set ns.graph_model = graph.nodes.get("model." + project_name + "." + model.name) %}
-        {# if the model uses an alias, the above call was unsuccessful, so loop through the graph to grab it by the alias instead #}
-        {% if ns.graph_model is none %}
-            {% for node in graph.nodes.values() %}
-                {% if node.alias == model.name and node.schema == model.schema %}
-                    {% set ns.graph_model = node %}
-                {% endif %}
-            {% endfor %}
-        {% endif %}
-        {% set ns.test_sql = ns.graph_model.raw_sql %}
+        {% set graph_model = graph.nodes["model." + project_name + "." + model.name] %}
+        {% set ns.test_sql = graph_model.raw_sql %}
 
         {% for k,v in input_mapping.items() %}
             {# render the original sql and replacement key before replacing because v is already rendered when it is passed to this test #}
@@ -30,10 +22,7 @@
 
         {# SQL Server requires us to specify a table type because it calls `drop_relation_script()` from `create_table_as()`.
         I'd prefer to use something like RelationType.table, but can't find a way to access the relation types #}
-        {% if not adapter.check_schema_exists(database=model.database, schema=model.schema) %}
-            {% do adapter.create_schema(api.Relation.create(database=model.database, schema=model.schema)) %}
-        {% endif %}
-
+        {% do adapter.create_schema(api.Relation.create(database=model.database, schema=model.schema)) %}
         {% set mock_model_relation = make_temp_relation(dbt_datamocktool._get_model_to_mock(model), suffix=('_dmt_' ~ modules.datetime.datetime.now().strftime("%S%f"))) %}
 
         {% do run_query(create_table_as(true, mock_model_relation, ns.test_sql)) %}
@@ -41,6 +30,10 @@
 
 
     {{ mock_model_relation }}
+
+    {% for k in depends_on %}
+        -- depends_on: {{ k }}
+    {% endfor %}
 {% endmacro %}
 
 {# Spark-specific logic excludes a schema name in order to fix https://github.com/mjirv/dbt-datamocktool/issues/22 #}
